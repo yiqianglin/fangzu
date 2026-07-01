@@ -67,7 +67,13 @@ def split_amount_digits(amount):
 
 
 def load_house(template_house):
-    """读「房屋说明-{村}.xlsx」主 sheet 拿水单价（姓名/房租改用月历）"""
+    """读「房屋说明-{村}.xlsx」主 sheet 拿水单价/电单价（姓名/房租改用月历）
+
+    支持列：房号 / 是否在租 / 打通房 / 收款人 / 备注 / 水单价 / 电单价
+    「水单价」「电单价」为可选列；若某房号填了，则收据/应收租金按此覆盖全局默认。
+    ⚠️ 铁律：备注里写的水电单价必须同步落到「水单价」「电单价」列，
+       否则脚本读不到、收据显示的单价会跟金额对不上。
+    """
     wb = load_workbook(template_house, data_only=True)
     ws = wb.active
     hdr = [c.value for c in ws[1]]
@@ -79,6 +85,7 @@ def load_house(template_house):
         rno = str(row[0]).strip()
         house[rno] = {
             "water_price": row[idx["水单价"]] if idx.get("水单价") is not None else None,
+            "elec_price":  row[idx["电单价"]] if idx.get("电单价") is not None else None,
         }
     wb.close()
     return house
@@ -161,7 +168,7 @@ def load_receivable(receivable_xlsx):
 
 # ==================== 单张收据生成 ====================
 def gen_receipt(rno_data, ridx, house, cal, target_year, target_month,
-                water_price_default, elec_price, template_receipt, dir_receipt):
+                water_price_default, elec_price_default, template_receipt, dir_receipt):
     """生成 1 张收据 xlsx，返回 (路径, 房号, 各金额)"""
     rno = str(rno_data[ridx["房号"]]).strip()
     period = rno_data[ridx["本期租期文案"]]
@@ -181,6 +188,7 @@ def gen_receipt(rno_data, ridx, house, cal, target_year, target_month,
 
     h = house.get(rno, {})
     water_price = h.get("water_price") or water_price_default
+    elec_price  = h.get("elec_price")  or elec_price_default
 
     # 月历查 当月 + 下月
     cur = lookup_calendar(cal, rno, target_year, target_month)
