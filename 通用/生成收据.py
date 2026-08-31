@@ -190,6 +190,29 @@ def gen_receipt(rno_data, ridx, house, cal, target_year, target_month,
     water_price = h.get("water_price") or water_price_default
     elec_price  = h.get("elec_price")  or elec_price_default
 
+    # ==== 保底/兜底显示修正（铁律）====
+    # 场景：实际用量 < 保底吨数（或差=0走兜底1吨），费用按保底收，但收据 D=实际差、E=单价，
+    #      D×E 与费用金额对不上，租户会怀疑计算问题。
+    # 修正：反推「实际收费用量 = round(费用 / 单价)」，把本月读数 C 顶到 B+收费用量，
+    #      让 D=收费用量、D×E=费用 完全自洽。
+    # 前提：单价>0 且 费用>0；否则跳过（费用=0 不显示保底，也就没有对不上的问题）。
+    def _adjust_meter(prev, curr, diff, fee, price):
+        try:
+            if not price or price <= 0 or not fee or fee <= 0:
+                return prev, curr, diff
+            actual_diff = int(diff) if diff is not None else 0
+            billed = round(float(fee) / float(price))
+            if billed > actual_diff and prev is not None:
+                # 触发保底/兜底：把本月读数往上顶
+                new_curr = int(prev) + billed
+                return prev, new_curr, billed
+        except (TypeError, ValueError):
+            pass
+        return prev, curr, diff
+
+    pw, cw, dw = _adjust_meter(pw, cw, dw, fw, water_price)
+    pe, ce, de = _adjust_meter(pe, ce, de, fe, elec_price)
+
     # 月历查 当月 + 下月
     cur = lookup_calendar(cal, rno, target_year, target_month)
     next_year = target_year + 1 if target_month == 12 else target_year
