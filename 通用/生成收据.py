@@ -19,14 +19,58 @@
 - K7 下月预告：对比 (当月房租) vs (下月房租)，不一致才写 `下月（X月）房租改为XXX元`
   - 数据源：「房屋说明.租金月历」sheet → lookup_calendar(rno, year, month)
 - K5 / K6 / K9 / K10 一律不写下月预告
+- 租期文案禁止 31 号（v2.4）：读取「本期租期文案」后把 31日 归一化为 30日（避免大小月天数差异导致各月租期不一）
 - 「合计」行跳过，不出收据
 - 103 不出收据（在第 2 步已合并到 105）
+- 🔧 换表备注（v2.5）：应收租金表「备注」列里写 `换表:406+52=458`（或 `水换表:...`），
+  收据对应行的 K 列自动写 `406+52=458（换表）`，让租客看懂差值来源。
+  换表时「本月读数」填新表真实读数、「差值」手工固定，C−B≠D，必须靠备注解释。
+  📌 完整口径（三步走 / 下月起算基准 / 禁止做法）见 SKILL.md「业务规则 → 🔧 换表处理」，
+     本文件只负责实现，口径以 SKILL.md 为准。
 """
 import argparse
 import os
+import re
 import shutil
 import sys
 from openpyxl import load_workbook
+
+
+# ==================== 换表备注解析（v2.5）====================
+# 匹配应收租金表「备注」里的换表标记，支持：
+#   换表:406+52=458      → 电表换表
+#   电换表:406+52=458    → 电表换表
+#   水换表:12+3=15       → 水表换表
+_METER_SWAP_RE = {
+    "电": re.compile(r"(?:电换表|电表换表|换表)\s*[:：]\s*([0-9\+\-\*=\s]{3,30})"),
+    "水": re.compile(r"(?:水换表|水表换表)\s*[:：]\s*([0-9\+\-\*=\s]{3,30})"),
+}
+
+
+def parse_meter_swap_note(note):
+    """从「备注」文本里解析换表算式。
+
+    返回 (水表文案 or None, 电表文案 or None)。
+    文案形如 `406+52=458（换表）`。
+
+    ⚠️ 注意：不带水/电前缀的裸 `换表:` 一律按「电表」处理（历史习惯：换表绝大多数是电表）。
+       若水表也要写，必须显式写 `水换表:xxx`。
+    """
+    if not note:
+        return None, None
+    text = str(note)
+    water_txt = elec_txt = None
+    m_w = _METER_SWAP_RE["水"].search(text)
+    if m_w:
+        water_txt = f"{m_w.group(1).strip()}（换表）"
+    # 电表：先剥掉已匹配的水表片段，避免 `水换表:` 被裸 `换表:` 误吞
+    rest = text
+    if m_w:
+        rest = text.replace(m_w.group(0), "")
+    m_e = _METER_SWAP_RE["电"].search(rest)
+    if m_e:
+        elec_txt = f"{m_e.group(1).strip()}（换表）"
+    return water_txt, elec_txt
 
 
 # ==================== 工具函数 ====================
@@ -172,6 +216,9 @@ def gen_receipt(rno_data, ridx, house, cal, target_year, target_month,
     """生成 1 张收据 xlsx，返回 (路径, 房号, 各金额)"""
     rno = str(rno_data[ridx["房号"]]).strip()
     period = rno_data[ridx["本期租期文案"]]
+    # 🔒 v2.4 铁律：租期文案禁止出现 31 号，统一归一化为 30，避免大小月天数差异导致各月租期不一
+    if period:
+        period = str(period).replace('31日', '30日')
     pay_date = rno_data[ridx["本期收款日"]]
     rent = rno_data[ridx["房租"]] or 0
     mgmt = rno_data[ridx["管理费"]] or 0
@@ -213,6 +260,10 @@ def gen_receipt(rno_data, ridx, house, cal, target_year, target_month,
     pw, cw, dw = _adjust_meter(pw, cw, dw, fw, water_price)
     pe, ce, de = _adjust_meter(pe, ce, de, fe, elec_price)
 
+    # ==== 换表备注（v2.5）：从应收租金表「备注」列解析，写到收据 K5(水) / K6(电) ====
+    raw_note = rno_data[ridx["备注"]] if "备注" in ridx else None
+    swap_w_txt, swap_e_txt = parse_meter_swap_note(raw_note)
+
     # 月历查 当月 + 下月
     cur = lookup_calendar(cal, rno, target_year, target_month)
     next_year = target_year + 1 if target_month == 12 else target_year
@@ -242,6 +293,7 @@ def gen_receipt(rno_data, ridx, house, cal, target_year, target_month,
     ws['E5'] = water_price
     for col, v in split_amount_digits(fw).items():
         ws[f'{col}5'] = v
+    ws['K5'] = swap_w_txt          # 换表备注（无则 None）
 
     # 电费
     ws['B6'] = pe
@@ -250,6 +302,7 @@ def gen_receipt(rno_data, ridx, house, cal, target_year, target_month,
     ws['E6'] = elec_price
     for col, v in split_amount_digits(fe).items():
         ws[f'{col}6'] = v
+    ws['K6'] = swap_e_txt          # 换表备注（无则 None）
 
     # 房租
     ws['B7'] = f"{period}房租"
